@@ -49,3 +49,8 @@ ignore-paths = [
 
 [tool.pylint.FORMAT]
 max-module-lines = 2000
+
+[project.optional-dependencies]
+scripts = [
+    "torch_geometric>=2.5",
+]
