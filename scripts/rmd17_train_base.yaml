@@ -20,7 +20,7 @@ gate: silu
 # Training
 batch_size: 5
 valid_batch_size: 5
-max_num_epochs: 500
+max_num_epochs: 105
 lr: 0.01
 amsgrad: yes
 weight_decay: 5.0e-7

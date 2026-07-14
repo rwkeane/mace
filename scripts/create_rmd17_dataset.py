@@ -118,14 +118,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--train-size",
         type=int,
-        default=50,
-        help="Number of training configurations (default: 50)",
+        default=950,
+        help="Number of training configurations (default: 950)",
     )
     parser.add_argument(
         "--valid-size",
         type=int,
-        default=950,
-        help="Number of validation configurations (default: 950)",
+        default=50,
+        help="Number of validation configurations (default: 50)",
     )
     parser.add_argument(
         "--seed",
