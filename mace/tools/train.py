@@ -26,6 +26,7 @@ from mace.cli.visualise_train import TrainingPlotter
 
 from . import torch_geometric
 from .checkpoint import CheckpointHandler, CheckpointState
+from .cuda_timer import CudaPassTimer
 from .torch_tools import to_numpy
 from .utils import (
     MetricsLogger,
@@ -172,6 +173,9 @@ def train(
     distributed_model: Optional[DistributedDataParallel] = None,
     train_sampler: Optional[DistributedSampler] = None,
     rank: Optional[int] = 0,
+    cuda_timing: bool = False,
+    cuda_timing_warmup: int = 5,
+    cuda_timing_logger: Optional[MetricsLogger] = None,
 ):
     lowest_loss = np.inf
     valid_loss = np.inf
@@ -183,6 +187,15 @@ def train(
 
     if max_grad_norm is not None:
         logging.info(f"Using gradient clipping with tolerance={max_grad_norm:.3f}")
+
+    if cuda_timing and device.type != "cuda":
+        logging.warning("cuda_timing is enabled but device is not cuda; disabling timing")
+        cuda_timing = False
+    if cuda_timing and rank == 0:
+        logging.info(
+            "CUDA pass timing enabled: logging train/valid GPU times from "
+            f"epoch {start_epoch + cuda_timing_warmup} (warmup={cuda_timing_warmup})"
+        )
 
     logging.info("")
     logging.info("===========TRAINING===========")
@@ -198,6 +211,7 @@ def train(
             data_loader=valid_loader,
             output_args=output_args,
             device=device,
+            measure_cuda_time=False,
         )
         valid_err_log(
             valid_loss_head, eval_metrics, logger, log_errors, None, valid_loader_name
@@ -229,7 +243,8 @@ def train(
             train_sampler.set_epoch(epoch)
         if "ScheduleFree" in type(optimizer).__name__:
             optimizer.train()
-        train_one_epoch(
+        measure_cuda_time = cuda_timing and epoch >= start_epoch + cuda_timing_warmup
+        train_time_ms = train_one_epoch(
             model=model,
             loss_fn=loss_fn,
             data_loader=train_loader,
@@ -243,6 +258,7 @@ def train(
             distributed=distributed,
             distributed_model=distributed_model,
             rank=rank,
+            measure_cuda_time=measure_cuda_time,
         )
         if distributed:
             torch.distributed.barrier()
@@ -259,6 +275,8 @@ def train(
                 optimizer.eval()
             with param_context:
                 wandb_log_dict = {}
+                valid_time_ms = 0.0
+                num_valid_batches = 0
                 for valid_loader_name, valid_loader in valid_loaders.items():
                     valid_loss_head, eval_metrics = evaluate(
                         model=model_to_evaluate,
@@ -266,7 +284,11 @@ def train(
                         data_loader=valid_loader,
                         output_args=output_args,
                         device=device,
+                        measure_cuda_time=measure_cuda_time,
                     )
+                    if measure_cuda_time:
+                        valid_time_ms += eval_metrics.get("cuda_time_ms", 0.0)
+                        num_valid_batches += len(valid_loader)
                     if rank == 0:
                         valid_err_log(
                             valid_loss_head,
@@ -293,6 +315,19 @@ def train(
                 valid_loss = (
                     valid_loss_head  # consider only the last head for the checkpoint
                 )
+                if measure_cuda_time and rank == 0 and cuda_timing_logger is not None:
+                    timing_record = {
+                        "epoch": epoch,
+                        "train_time_ms": train_time_ms,
+                        "valid_time_ms": valid_time_ms,
+                        "num_train_batches": len(train_loader),
+                        "num_valid_batches": num_valid_batches,
+                    }
+                    cuda_timing_logger.log(timing_record)
+                    logging.info(
+                        f"Epoch {epoch} CUDA timing: "
+                        f"train={train_time_ms:.2f} ms, valid={valid_time_ms:.2f} ms"
+                    )
             if log_wandb:
                 wandb.log(wandb_log_dict)
             if rank == 0:
@@ -361,42 +396,47 @@ def train_one_epoch(
     distributed: bool,
     distributed_model: Optional[DistributedDataParallel] = None,
     rank: Optional[int] = 0,
-) -> None:
+    measure_cuda_time: bool = False,
+) -> Optional[float]:
     model_to_train = model if distributed_model is None else distributed_model
 
-    if isinstance(optimizer, LBFGS):
-        _, opt_metrics = take_step_lbfgs(
-            model=model_to_train,
-            loss_fn=loss_fn,
-            data_loader=data_loader,
-            optimizer=optimizer,
-            ema=ema,
-            output_args=output_args,
-            max_grad_norm=max_grad_norm,
-            device=device,
-            distributed=distributed,
-            rank=rank,
-        )
-        opt_metrics["mode"] = "opt"
-        opt_metrics["epoch"] = epoch
-        if rank == 0:
-            logger.log(opt_metrics)
-    else:
-        for batch in data_loader:
-            _, opt_metrics = take_step(
+    pass_timer = CudaPassTimer(device=device, enabled=measure_cuda_time)
+    with pass_timer:
+        if isinstance(optimizer, LBFGS):
+            _, opt_metrics = take_step_lbfgs(
                 model=model_to_train,
                 loss_fn=loss_fn,
-                batch=batch,
+                data_loader=data_loader,
                 optimizer=optimizer,
                 ema=ema,
                 output_args=output_args,
                 max_grad_norm=max_grad_norm,
                 device=device,
+                distributed=distributed,
+                rank=rank,
             )
             opt_metrics["mode"] = "opt"
             opt_metrics["epoch"] = epoch
             if rank == 0:
                 logger.log(opt_metrics)
+        else:
+            for batch in data_loader:
+                _, opt_metrics = take_step(
+                    model=model_to_train,
+                    loss_fn=loss_fn,
+                    batch=batch,
+                    optimizer=optimizer,
+                    ema=ema,
+                    output_args=output_args,
+                    max_grad_norm=max_grad_norm,
+                    device=device,
+                )
+                opt_metrics["mode"] = "opt"
+                opt_metrics["epoch"] = epoch
+                if rank == 0:
+                    logger.log(opt_metrics)
+
+    return pass_timer.elapsed_ms
 
 
 def take_step(
@@ -561,26 +601,30 @@ def evaluate(
     data_loader: DataLoader,
     output_args: Dict[str, bool],
     device: torch.device,
+    measure_cuda_time: bool = False,
 ) -> Tuple[float, Dict[str, Any]]:
 
     metrics = MACELoss(loss_fn=loss_fn).to(device)
 
     start_time = time.time()
-
-    with preserve_grad_state(model):
-        for batch in data_loader:
-            batch = batch.to(device)
-            batch_dict = batch.to_dict()
-            output = model(
-                batch_dict,
-                training=False,
-                compute_force=output_args["forces"],
-                compute_virials=output_args["virials"],
-                compute_stress=output_args["stress"],
-            )
-            avg_loss, aux = metrics(batch, output)
-    avg_loss, aux = metrics.compute()
+    pass_timer = CudaPassTimer(device=device, enabled=measure_cuda_time)
+    with pass_timer:
+        with preserve_grad_state(model):
+            for batch in data_loader:
+                batch = batch.to(device)
+                batch_dict = batch.to_dict()
+                output = model(
+                    batch_dict,
+                    training=False,
+                    compute_force=output_args["forces"],
+                    compute_virials=output_args["virials"],
+                    compute_stress=output_args["stress"],
+                )
+                avg_loss, aux = metrics(batch, output)
+        avg_loss, aux = metrics.compute()
     aux["time"] = time.time() - start_time
+    if pass_timer.elapsed_ms is not None:
+        aux["cuda_time_ms"] = pass_timer.elapsed_ms
     metrics.reset()
 
     return avg_loss, aux

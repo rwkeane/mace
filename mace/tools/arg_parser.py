@@ -994,6 +994,18 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         "--eval_interval", help="evaluate model every <n> epochs", type=int, default=1
     )
     parser.add_argument(
+        "--cuda_timing",
+        help="Log per-epoch train/validation GPU pass times using torch.cuda.Event",
+        type=str2bool,
+        default=False,
+    )
+    parser.add_argument(
+        "--cuda_timing_warmup",
+        help="Number of epochs to skip before logging CUDA pass times",
+        type=int,
+        default=5,
+    )
+    parser.add_argument(
         "--keep_checkpoints",
         help="keep all checkpoints",
         action="store_true",

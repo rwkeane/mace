@@ -834,6 +834,11 @@ def run(args) -> None:
     logger = tools.MetricsLogger(
         directory=args.results_dir, tag=tag + "_train"
     )  # pylint: disable=E1123
+    cuda_timing_logger = None
+    if args.cuda_timing:
+        cuda_timing_logger = tools.MetricsLogger(
+            directory=args.results_dir, tag=tag + "_cuda_timing"
+        )
 
     lr_scheduler = LRScheduler(optimizer, args)
 
@@ -965,6 +970,9 @@ def run(args) -> None:
         plotter=plotter,
         train_sampler=train_sampler,
         rank=rank,
+        cuda_timing=args.cuda_timing,
+        cuda_timing_warmup=args.cuda_timing_warmup,
+        cuda_timing_logger=cuda_timing_logger,
     )
 
     logging.info("")

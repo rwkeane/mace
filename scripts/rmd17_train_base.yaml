@@ -21,7 +21,6 @@ gate: silu
 batch_size: 5
 valid_batch_size: 5
 max_num_epochs: 500
-eval_interval: 4
 lr: 0.01
 amsgrad: yes
 weight_decay: 5.0e-7
@@ -37,11 +36,25 @@ forces_weight: 1000.0
 energy_key: REF_energy
 forces_key: REF_forces
 loss: weighted
+eval_interval: 1
 
 E0s: average
+save_all_checkpoints: false
 
 config_type_weights:
   Default: 1.0
 
 device: cuda
 default_dtype: float32
+
+num_workers: 0
+plot: false
+pin_memory: false
+
+# CUDA pass timing (torch.cuda.Event)
+cuda_timing: yes
+cuda_timing_warmup: 5
+
+# cuEquivariance support
+# enable_cueq: yes
+# only_cueq: yes
