@@ -40,5 +40,4 @@ dist/
 
 .benchmarks
 *.png
-/scripts
 *.cube
