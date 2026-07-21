@@ -39,3 +39,14 @@ class CudaPassTimer:
         self._end.record()
         self._end.synchronize()
         self.elapsed_ms = self._start.elapsed_time(self._end)
+
+
+def reset_peak_memory(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+
+
+def peak_memory_mb(device: torch.device) -> Optional[float]:
+    if device.type == "cuda":
+        return torch.cuda.max_memory_allocated(device) / (1024**2)
+    return None

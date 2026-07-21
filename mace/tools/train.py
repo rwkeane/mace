@@ -26,7 +26,7 @@ from mace.cli.visualise_train import TrainingPlotter
 
 from . import torch_geometric
 from .checkpoint import CheckpointHandler, CheckpointState
-from .cuda_timer import CudaPassTimer
+from .cuda_timer import CudaPassTimer, peak_memory_mb, reset_peak_memory
 from .torch_tools import to_numpy
 from .utils import (
     MetricsLogger,
@@ -244,7 +244,9 @@ def train(
         if "ScheduleFree" in type(optimizer).__name__:
             optimizer.train()
         measure_cuda_time = cuda_timing and epoch >= start_epoch + cuda_timing_warmup
-        train_time_ms = train_one_epoch(
+        if measure_cuda_time:
+            reset_peak_memory(device)
+        train_time_ms, train_loss = train_one_epoch(
             model=model,
             loss_fn=loss_fn,
             data_loader=train_loader,
@@ -316,17 +318,23 @@ def train(
                     valid_loss_head  # consider only the last head for the checkpoint
                 )
                 if measure_cuda_time and rank == 0 and cuda_timing_logger is not None:
+                    epoch_peak_memory_mb = peak_memory_mb(device)
                     timing_record = {
                         "epoch": epoch,
                         "train_time_ms": train_time_ms,
                         "valid_time_ms": valid_time_ms,
+                        "train_loss": train_loss,
+                        "valid_loss": float(valid_loss_head),
+                        "peak_memory_mb": epoch_peak_memory_mb,
                         "num_train_batches": len(train_loader),
                         "num_valid_batches": num_valid_batches,
                     }
                     cuda_timing_logger.log(timing_record)
                     logging.info(
                         f"Epoch {epoch} CUDA timing: "
-                        f"train={train_time_ms:.2f} ms, valid={valid_time_ms:.2f} ms"
+                        f"train={train_time_ms:.2f} ms, valid={valid_time_ms:.2f} ms, "
+                        f"train_loss={train_loss:.6f}, valid_loss={float(valid_loss_head):.6f}, "
+                        f"peak_memory={epoch_peak_memory_mb:.1f} MB"
                     )
             if log_wandb:
                 wandb.log(wandb_log_dict)
@@ -397,13 +405,16 @@ def train_one_epoch(
     distributed_model: Optional[DistributedDataParallel] = None,
     rank: Optional[int] = 0,
     measure_cuda_time: bool = False,
-) -> Optional[float]:
+) -> Tuple[Optional[float], Optional[float]]:
     model_to_train = model if distributed_model is None else distributed_model
 
     pass_timer = CudaPassTimer(device=device, enabled=measure_cuda_time)
+    total_loss = 0.0
+    total_graphs = 0
+    train_loss: Optional[float] = None
     with pass_timer:
         if isinstance(optimizer, LBFGS):
-            _, opt_metrics = take_step_lbfgs(
+            loss, opt_metrics = take_step_lbfgs(
                 model=model_to_train,
                 loss_fn=loss_fn,
                 data_loader=data_loader,
@@ -415,13 +426,15 @@ def train_one_epoch(
                 distributed=distributed,
                 rank=rank,
             )
+            if measure_cuda_time:
+                train_loss = float(to_numpy(loss))
             opt_metrics["mode"] = "opt"
             opt_metrics["epoch"] = epoch
             if rank == 0:
                 logger.log(opt_metrics)
         else:
             for batch in data_loader:
-                _, opt_metrics = take_step(
+                loss, opt_metrics = take_step(
                     model=model_to_train,
                     loss_fn=loss_fn,
                     batch=batch,
@@ -431,12 +444,17 @@ def train_one_epoch(
                     max_grad_norm=max_grad_norm,
                     device=device,
                 )
+                if measure_cuda_time:
+                    total_loss += float(to_numpy(loss))
+                    total_graphs += batch.num_graphs
                 opt_metrics["mode"] = "opt"
                 opt_metrics["epoch"] = epoch
                 if rank == 0:
                     logger.log(opt_metrics)
+            if measure_cuda_time and total_graphs > 0:
+                train_loss = total_loss / total_graphs
 
-    return pass_timer.elapsed_ms
+    return pass_timer.elapsed_ms, train_loss
 
 
 def take_step(
