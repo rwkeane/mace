@@ -204,6 +204,8 @@ def write_run_config(
             "work_dir": str(run_dir),
             "plot": False,
             "save_all_checkpoints": False,
+            # Avoid post-train deepcopy/torch.save; validation only needs log stats.
+            "skip_save_model": True,
         }
     )
 

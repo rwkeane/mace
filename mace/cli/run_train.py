@@ -1068,7 +1068,7 @@ def run(args) -> None:
         else:
             logging.info(f"Loaded Stage one model from epoch {epoch} for evaluation")
 
-        if rank == 0:
+        if rank == 0 and not args.skip_save_model:
             # Save entire model
             if swa_eval:
                 model_path = Path(args.checkpoints_dir) / (tag + "_stagetwo.model")
@@ -1127,6 +1127,8 @@ def run(args) -> None:
                     )
                 except Exception as e:  # pylint: disable=W0718
                     pass
+        elif rank == 0:
+            logging.info("Skipping final model save (--skip_save_model)")
 
         logging.info("Computing metrics for training, validation, and test sets")
         for param in model.parameters():

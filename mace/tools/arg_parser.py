@@ -1030,6 +1030,12 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         default=False,
     )
     parser.add_argument(
+        "--skip_save_model",
+        help="Skip final .model export (deepcopy/torch.save) after training",
+        type=str2bool,
+        default=False,
+    )
+    parser.add_argument(
         "--clip_grad",
         help="Gradient Clipping Value",
         type=check_float_or_none,
